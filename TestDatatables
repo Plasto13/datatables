@@ -1,0 +1,510 @@
+<?php
+
+namespace Modules\Test\DataTables;
+
+use Html;
+use Illuminate\Contracts\Routing\UrlGenerator;
+use Illuminate\Support\Arr;
+use Modules\Test\Entities\Test;
+use Modules\Test\Repositories\TestRepository;
+use Modules\User\Contracts\Authentication;
+use Yajra\DataTables\DataTables;
+use Yajra\DataTables\Html\Button;
+use Yajra\DataTables\Html\Column;
+use Yajra\DataTables\Html\Editor\Editor;
+use Yajra\DataTables\Html\Editor\Fields;
+use Yajra\DataTables\Services\DataTable;
+
+class TestDataTable extends DataTable
+{
+    protected $table;
+
+    protected $repositories;
+
+    protected $auth;
+
+    /**
+     * @var array
+     */
+    protected $options = [];
+
+    protected $ajaxUrl;
+
+    protected $model;
+
+    protected $bulkChangeUrl;
+
+    /**
+     * @var string
+     */
+    protected $filterTemplate = 'base::table.filter';
+
+     /**
+     * @var bool
+     */
+    protected $hasFilter = true;
+
+    public function __construct(UrlGenerator $urlGenerator, TestRepository $repositories, Datatables $table, Authentication $auth)
+    {
+        $this->bulkChangeUrl = route('api.test.test.bulk-changes');
+        $this->table = $table;
+        $this->auth = $auth;
+        $this->repositories = $repositories;
+        $this->model = $this->repositories->getModel();
+        $this->ajaxUrl = $urlGenerator->current();
+        if (!$this->getOption('id')) {
+            $this->setOption('id', 'test-tests-table');
+        }
+    }
+
+        /**
+     * @param string $key
+     * @return string
+     */
+    public function getOption(string $key): ?string
+    {
+        return Arr::get($this->options, $key);
+    }
+
+    /**
+     * @param string $key
+     * @param mixed $value
+     * @return $this
+     */
+    public function setOption(string $key, $value): self
+    {
+        $this->options[$key] = $value;
+
+        return $this;
+    }
+
+    public function getCurrentUrl() : String
+    {
+        return $this->ajaxUrl;
+    }
+
+   /**
+     * Build DataTable class.
+     *
+     * @param mixed $query Results from query() method.
+     * @return \Yajra\DataTables\DataTableAbstract
+     */
+    public function dataTable($query)
+    {
+        return datatables()
+            ->eloquent($query)
+            ->addColumn('action', 'tests.action');
+    }
+
+    /**
+     * Get query source of dataTable.
+     *
+     * @param \App\Test $model
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function query()
+    {
+        $request = request();
+        $query = $this->model->with('translations')->select('test__tests.*');
+        // if ($request->has('trash')) {
+        //     $query->onlyTrashed();
+        // }
+
+        return $this->applyScopes($query);
+    }
+
+    /**
+     * Optional method if you want to use html builder.
+     *
+     * @return \Yajra\DataTables\Html\Builder
+     */
+    public function html()
+    {
+        return $this->builder()
+                    ->setTableId($this->getOption('id'))
+                    ->parameters([
+                        'processing'   => true,
+                        'serverSide'   => true,
+                        'bServerSide'  => true,
+                        'bDeferRender' => true,
+                        'bProcessing'  => true,
+                        'colReorder' => true,
+                        'language' => [
+                            'url' => asset("modules/core/js/vendor/datatables/".locale().".json")
+                                ],
+                        'processing'=> '<i class="fa fa-refresh fa-spin"></i>',
+                        'stateSave' => true,
+                        'stateSaveCallback' => "function(settings,data) {
+                                    localStorage.setItem( 'test-tests-table', JSON.stringify(data) );
+                                    }",
+                                'stateLoadCallback' => "function(settings) {
+                                    return JSON.parse( localStorage.getItem( 'test-tests-table' ) )
+                                    }",
+                    ])
+                    ->columns($this->getColumns())
+                    ->minifiedAjax()
+                    ->dom('<"top"<"pull-left"l><"pull-right"fB>><t><<"pull-left"i><"pull-right"p>>')
+                    ->searchDelay('500')
+                    ->orderBy(1)
+                    ->buttons(
+                        Button::make('excel')->className('btn btn-default btn-flat'),
+                        Button::make('pdfHtml5')->className('btn btn-default btn-flat'),
+                        Button::make('print')->className('btn btn-default btn-flat'),
+                        Button::make('colvis')->className('btn btn-default btn-flat'),
+                        // Button::make('reload')
+                    )
+                    ->pagingType('full_numbers');
+    }
+
+
+    /**
+     * @param \Illuminate\Database\Eloquent\Builder|Builder $query
+     * @return mixed
+     */
+    public function applyScopes($query)
+    {
+        $request = request();
+
+        $requestFilters = [];
+
+        if ($request->has('filter_columns') && ($request->input('filter_table_id') == $this->getOption('id'))) {
+            $requestFilters = [];
+            foreach ($request->input('filter_columns') as $key => $item) {
+                $requestFilters[] = [
+                    'column'   => $item,
+                    'operator' => $request->input('filter_operators.' . $key),
+                    'value'    => $request->input('filter_values.' . $key),
+                ];
+            }
+        }
+
+        foreach ($requestFilters as $requestFilter) {
+            if (isset($requestFilter['column']) && !empty($requestFilter['column'])) {
+                $query = $this->applyFilterCondition($query, $requestFilter['column'], $requestFilter['operator'],
+                    $requestFilter['value']);
+            }
+        }
+        if ($request->has('trash')) {
+            $query->onlyTrashed();
+        }
+
+        return parent::applyScopes($query);
+    }
+
+    /**
+     * @param Builder $query
+     * @param string $key
+     * @param string $operator
+     * @param string $value
+     * @return Builder
+     */
+    public function applyFilterCondition($query, string $key, string $operator, ?string $value)
+    {
+        if (strpos($key, '.') !== -1) {
+            $key = Arr::last(explode('.', $key));
+        }
+
+        switch ($key) {
+            case 'created_at':
+            case 'updated_at':
+                $value = Carbon::createFromFormat(config('core.base.general.date_format.date'), $value)->toDateString();
+                $query = $query->whereDate($key, $operator, $value);
+                break;
+            default:
+                if ($operator === 'like') {
+                    if ($this->repositories->isTranslated($key)) {
+                        $query->whereHas('translations', function ($q) use ($key, $operator, $value) {
+                                        $q->where($key, $operator, '%' . $value . '%');
+                        });
+                    } else {
+                        $query->where($key, $operator, '%' . $value . '%');
+                    }
+                    
+                    break;
+                }
+
+                if ($operator !== '=') {
+                    $value = (float)$value;
+                }
+                if ($this->repositories->isTranslated($key)) {
+                        $query->whereHas('translations', function ($q) use ($key, $operator, $value) {
+                                        $q->where($key, $operator, $value);
+                        });
+                    } else {
+                        $query->where($key, $operator, $value);
+                    }
+                break;
+
+                // $query = $query->where($key, $operator, $value);
+        }
+
+        return $query;
+    }
+
+
+    /**
+     * Get columns.
+     *
+     * @return array
+     */
+    protected function getColumns()
+    {
+        return [
+            'checkbox' => [
+                'defaultContent' => '<input type="checkbox"/>',
+                'data' => 'checkbox',
+                'width'      => '10px',
+                'class'      => 'text-left no-sort',
+                'title'      => 'checkbox',
+                'orderable'  => false,
+                'searchable' => false,
+                'exportable' => false,
+                'printable'  => false,
+            ],
+            Column::make('id'),
+            'translations.title' => [
+                        'name' => 'translations.title',
+                        'data' => 'translations.title',
+                        'title' => 'title',
+                        'searchable' => true,
+                        'orderable' => true,
+                        // 'render' => 'function(){}',
+                        'footer' => 'title',
+                        'exportable' => true,
+                        'printable' => true,
+                        'visible' => true,
+                        ],
+            'translations.description' => [
+                        'name' => 'translations.description',
+                        'data' => 'translations.description',
+                        'title' => 'description',
+                        'searchable' => true,
+                        'orderable' => true,
+                        // 'render' => 'function(){}',
+                        'footer' => 'title',
+                        'exportable' => true,
+                        'printable' => true,
+                        'visible' => true,
+                        ],
+            Column::make('created_at'),
+            Column::make('updated_at'),
+            Column::computed('action')
+                  ->exportable(false)
+                  ->printable(false)
+                  ->width(60)
+                  ->addClass('text-center'),
+        ];
+    }
+
+    /**
+     * @return array
+     */
+    public function getFilters(): array
+    {
+        return [
+            'title' => [
+                'title'    => 'title',
+                'type'     => 'text',
+                'validate' => 'required|max:120',
+            ],
+            'description' => [
+                'title'    => 'description',
+                'type'     => 'text',
+                'validate' => 'required|max:120',
+            ],
+            'created_at' => [
+                'title' => 'created_at',
+                'type'  => 'date',
+            ],
+        ];;
+    }
+
+    /**
+     * @return array
+     * @throws Throwable
+     */
+    public function bulkActions(): array
+    {
+        $actions = [];
+        if ($this->getBulkChanges() && $this->auth->hasAccess('test.tests.edit')) {
+            $actions['bulk-change'] = view('base::table.bulk-changes', [
+                'bulk_changes' => $this->getBulkChanges(),
+                'class'        => get_class($this),
+                'url'          => $this->bulkChangeUrl,
+            ])->render();
+        }
+        if ($this->getBulkDelete() && $this->auth->hasAccess('test.tests.destroy')) {
+            $actions['bulk-delete'] = view('base::table.bulk-delete', [
+                    'bulk_changes' => $this->getBulkDelete(),
+                    'class'        => get_class($this),
+                    'url'          => $this->bulkChangeUrl,
+                ])->render();
+        }
+        $actions['bulk-export'] = view('base::table.bulk-export', [
+                'bulk_changes' => $this->getBulkExport(),
+                'class'        => get_class($this),
+                'url'          => $this->bulkChangeUrl,
+            ])->render();
+
+        return $actions;
+    }
+
+    /**
+     * Render Filter
+     * @return string
+     * @throws Throwable
+     */
+    public function renderFilter(): string
+    {
+        $tableId = 'test-tests-table';
+        $columns = $this->getFilters();
+        $route = $this->getCurrentUrl();
+
+        $request = request();
+        $requestFilters = [
+            '-1' => [
+                'column'   => '',
+                'operator' => '=',
+                'value'    => '',
+            ],
+        ];
+
+        if ($request->input('filter_columns')) {
+            $requestFilters = [];
+            foreach ($request->input('filter_columns', []) as $key => $item) {
+                $requestFilters[] = [
+                    'column'   => $item,
+                    'operator' => $request->input('filter_operators.' . $key),
+                    'value'    => $request->input('filter_values.' . $key),
+                ];
+            }
+        }
+
+        return view($this->filterTemplate, compact('columns', 'tableId', 'requestFilters', 'route'))->render();
+    }
+
+    public function isHasFilter(): bool
+    {
+        return $this->hasFilter;
+    }
+
+    /**
+     * Get filename for export.
+     *
+     * @return string
+     */
+    protected function filename()
+    {
+        return 'test__tests' . date('YmdHis');
+    }
+
+     /**
+     * 
+     */
+    public function getBulkChanges(): array
+    {
+        return [
+            'title' => [
+                'title'    => 'Change title',
+                'type'     => 'text',
+                'validate' => 'required|max:120',
+            ],
+            'description' => [
+                'title'    => 'Change description',
+                'type'     => 'text',
+                'validate' => 'required|max:120',
+            ],
+        ];
+    }
+
+     /**
+     * 
+     */
+    public function getBulkDelete(): array
+    {
+        return [
+            'title' => [
+                'title'    => 'Delete',
+                'value'    => 'delete',
+            ],
+            'description' => [
+                'title'    => 'Trash',            
+                'value'    => 'trash' ,
+                ]          
+        ];
+    }
+    
+     /**
+     * 
+     */
+    public function getBulkExport(): array
+    {
+        return [
+            'title' => [
+                'title'    => 'Export selected',
+                'value'    => 'selected',
+            ],
+            'description' => [
+                'title'    => 'Export All',
+                'value'    => 'all', 
+            ],
+        ];
+    }
+
+    public function ajax()
+    {
+        return $this->table
+            ->eloquent($this->query())
+            ->editColumn('translations.title', function ($item) {
+                return $item->getTranslation()->title;
+            })
+            ->editColumn('translations.description', function ($item) {
+                return $item->getTranslation()->description;
+            })
+            ->editColumn('checkbox', function ($item) {
+                return '<input type="checkbox" value="' . $item->id . '" class="checkboxes"/>';
+            })
+            // ->editColumn('created_at', function ($item) {
+            //     return date_from_database($item->created_at, config('core.base.general.date_format.date'));
+            // })
+            // ->editColumn('status', function ($item) {
+            //     return $item->status->toHtml();
+            // });
+
+            ->addColumn('action', function ($item) {
+                return $this->getActionButtons($item);
+            })
+            ->escapeColumns([])
+            ->make(true);
+    }
+
+    protected function getActionButtons($item, $extra = null) : String
+    {
+        $edit = $this->addEditButton($item);
+        $delete = $this->addDeleteButton($item);
+        return view('base::buttons.buttons', compact('edit', 'delete', 'item', 'extra'))->render();
+    }
+
+    protected function addEditButton($item)
+    {
+        if ($item->deleted_at === null) {
+           if ($this->auth->hasAccess('test.tests.edit')) {
+            return '<a href="12" class="btn btn-default btn-flat" title="'.trans('base::table.general.edit resource').'"><i class="fas fa-pencil-alt"></i></a>';
+            }
+        }
+        
+        return false;
+    }
+
+    protected function addDeleteButton($item)
+    {
+        if ($this->auth->hasAccess('test.tests.destroy')) {
+            if ($item->deleted_at === null) {
+                return "<button class='btn btn-danger btn-flat' data-toggle='modal' data-target='#modal-delete-confirmation' data-action-target=".route('admin.test.test.destroy',[$item->id])." title=".trans('base::table.general.trash resource')."><i class='fa fa-trash'></i></button>";
+            }
+            return "<button class='btn btn-danger btn-flat' data-toggle='modal' data-target='#modal-delete-confirmation' data-action-target=".route('admin.test.test.destroy',[$item->id])." title=".trans('base::table.general.destroy resource')."><i class='fa fa-trash'></i></button>";
+        }
+
+    }
+
+}
